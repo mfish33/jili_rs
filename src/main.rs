@@ -69,9 +69,9 @@ struct BindingV {
 type Environment = Vec<BindingV>;
 
 fn main() {
-    let source = "((var (
-        (fib = (x => (if (<= x 1) x (+ (fib (- x 1)) (fib (- x 2))))))
-    ) in (fib 17)))";
+    let source = "(var (
+        (fib = (x fib => (if (<= x 1) x (+ (fib (- x 1) fib) (fib (- x 2) fib)))))
+    ) in (fib 17 fib))";
     let result = top_interp(source);
     println!("Fibonacci of 17 is: {:?}", result);
 }
