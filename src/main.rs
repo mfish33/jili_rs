@@ -100,7 +100,7 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
                         .iter()
                         .map(|cons_any| {
                             parse_binding(
-                                cons_any
+                                &cons_any
                                     .as_cons()
                                     .expect("unexpected binding syntax")
                                     .to_vec()
@@ -110,7 +110,7 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
                         .collect();
 
                     fn create_chain(
-                        bindings: Vec<(String, ExprC)>,
+                        bindings: &[(String, ExprC)],
                         last: &lexpr::Value,
                     ) -> Box<ExprC> {
                         match &bindings[..] {
@@ -118,16 +118,13 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
                             [(from, to), rst @ ..] => Box::new(ExprC::AppC {
                                 fun: Box::new(ExprC::CloC {
                                     parameters: vec![from.clone()],
-                                    body: create_chain(rst.to_vec(), last),
+                                    body: create_chain(rst, last),
                                 }),
                                 args: vec![to.clone()],
                             }),
                         }
                     }
-                    ExprC::CloC {
-                        body: create_chain(bindings, body),
-                        parameters: vec![],
-                    }
+                    *create_chain(&bindings, body)
                 }
                 [params @ .., lexpr::Value::Symbol(fn_def), body] if &**fn_def == "=>" => {
                     ExprC::CloC {
@@ -154,7 +151,7 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
     }
 }
 
-fn parse_binding(tokens: Vec<lexpr::Value>) -> (String, ExprC) {
+fn parse_binding(tokens: &Vec<lexpr::Value>) -> (String, ExprC) {
     match &tokens[..] {
         [lexpr::Value::Symbol(from), lexpr::Value::Symbol(equals), to] if &**equals == "=" => {
             (from.to_string(), parse(to))
@@ -205,7 +202,7 @@ fn interp(exp: &ExprC, env: &Environment) -> Value {
                 Value::CloV {
                     parameters,
                     body,
-                    environment,
+                    environment:clo_env,
                 } => {
                     if parameters.len() != args.len() {
                         panic!(
@@ -213,8 +210,7 @@ fn interp(exp: &ExprC, env: &Environment) -> Value {
                             parameters, args
                         )
                     }
-                    let mut next_env = environment.clone();
-                    next_env.append(&mut env.clone());
+                    let mut next_env = clo_env.clone();
                     next_env.extend(
                         parameters
                             .into_iter()
@@ -285,9 +281,7 @@ fn top_interp(source: &str) -> String {
         jili_binary_arith!(<=),
         BindingV {
             from: "equals?".into(),
-            to: Value::Intrinsic(Intrinsic::Binary(|a, b| {
-                (a == b).into()
-            })),
+            to: Value::Intrinsic(Intrinsic::Binary(|a, b| (a == b).into())),
         },
         BindingV {
             from: "error".into(),
@@ -295,12 +289,12 @@ fn top_interp(source: &str) -> String {
         },
         BindingV {
             from: "true".into(),
-            to: Value::BoolV(true)
+            to: Value::BoolV(true),
         },
         BindingV {
             from: "false".into(),
-            to: Value::BoolV(false)
-        }
+            to: Value::BoolV(false),
+        },
     ];
 
     let result = interp(&prog, &base_env);
@@ -326,24 +320,24 @@ mod tests {
             "Shadowing works"
         );
         assert_eq!(top_interp("(((=> +)) 3 4)"), "7", "return intrinsic");
-        assert_eq!(top_interp("((var ((x = 5)) in x))"), "5", "Basic Binding");
+        assert_eq!(top_interp("(var ((x = 5)) in x)"), "5", "Basic Binding");
         assert_eq!(
             top_interp(
-                "((var (
+                "(var (
                     (hi = 5)
                     (bye = (+ 2 hi))
                     (f = (=> (+ hi bye)))
                     ) in
-                    (f)))"
+                    (f))"
             ),
             "12",
             "More complex binding"
         );
         assert_eq!(
             top_interp(
-                "((var (
-                    (fib = (x => (if (<= x 1) x (+ (fib (- x 1)) (fib (- x 2))))))
-                ) in (fib 17)))"
+                "(var (
+                    (fib = (x fib => (if (<= x 1) x (+ (fib (- x 1) fib) (fib (- x 2) fib)))))
+                ) in (fib 17 fib))"
             ),
             "1597",
             "Fibonacci sequence"
