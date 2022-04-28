@@ -7,3 +7,6 @@ edition = "2021"
 
 [dependencies]
 lexpr = "0.2.6"
+
+[profile.release]
+debug = true

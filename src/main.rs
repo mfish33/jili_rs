@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, rc::Rc};
+use std::{borrow::Borrow, rc::Rc, time::Instant};
 
 use lexpr::{self};
 
@@ -26,8 +26,8 @@ enum ExprC<'a> {
 enum Value<'a> {
     NumV(f64),
     CloV {
-        parameters: Vec<&'a str>,
-        body: ExprC<'a>,
+        parameters: &'a Vec<&'a str>,
+        body: &'a ExprC<'a>,
         environment: Environment<'a>,
     },
     StringV(&'a str),
@@ -88,7 +88,7 @@ impl LexprConsExtensions for lexpr::Cons {
     }
 }
 
-fn parse<'a>(sexp: &'a lexpr::Value) -> ExprC<'a> {
+fn parse(sexp: &lexpr::Value) -> ExprC<'_> {
     match sexp {
         lexpr::Value::Symbol(id) => ExprC::IdC(id),
         lexpr::Value::Number(num) => ExprC::NumC(num.as_f64().unwrap()),
@@ -136,7 +136,7 @@ fn parse<'a>(sexp: &'a lexpr::Value) -> ExprC<'a> {
                 }
                 [fun, args @ ..] => ExprC::AppC {
                     fun: Box::new(parse(fun)),
-                    args: args.into_iter().map(|sexp| parse(sexp)).collect(),
+                    args: args.iter().map(|sexp| parse(sexp)).collect(),
                 },
                 _ => panic!("`parse` Unexpected syntax while parsing: {}", sexp),
             }
@@ -149,7 +149,7 @@ fn create_binding_chain<'a>(
     bindings: &[(&'a str, ExprC<'a>)],
     last: &'a lexpr::Value,
 ) -> Box<ExprC<'a>> {
-    match &bindings[..] {
+    match bindings {
         [] => Box::new(parse(last)),
         [(from, to), rst @ ..] => Box::new(ExprC::AppC {
             fun: Box::new(ExprC::CloC {
@@ -179,11 +179,11 @@ fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Rc<Value<'a
     panic!("JILI unbound identifier: {}", id);
 }
 
-fn interp<'a, 'b>(exp: &ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
+fn interp<'a, 'b>(exp: &'a ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
     match exp {
         ExprC::NumC(num) => Rc::new(Value::NumV(*num)),
         ExprC::StringC(string) => Rc::new(Value::StringV(string)),
-        ExprC::IdC(id) => environment_lookup(&id, &env),
+        ExprC::IdC(id) => environment_lookup(id, env),
         ExprC::IfC {
             condition,
             then,
@@ -199,14 +199,14 @@ fn interp<'a, 'b>(exp: &ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
             }
         }
         ExprC::CloC { parameters, body } => Rc::new(Value::CloV {
-            body: *body.clone(),
-            parameters: parameters.clone(),
+            body,
+            parameters,
             environment: env.clone(),
         }),
         ExprC::AppC { fun, args } => {
             let value = match &**fun {
-                ExprC::IdC(name) => environment_lookup(&name, &env),
-                fn_exp => interp(&fn_exp, env),
+                ExprC::IdC(name) => environment_lookup(name, env),
+                fn_exp => interp(fn_exp, env),
             };
             match value.borrow() {
                 Value::CloV {
@@ -223,15 +223,15 @@ fn interp<'a, 'b>(exp: &ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
                     let mut next_env = clo_env.clone();
                     next_env.extend(
                         parameters
-                            .into_iter()
-                            .zip(args.into_iter().map(|arg| interp(arg, env)))
+                            .iter()
+                            .zip(args.iter().map(|arg| interp(arg, env)))
                             .map(|(from, to)| BindingV {
                                 from,
                                 to,
                             }),
                     );
 
-                    interp(&body, &next_env)
+                    interp(body, &next_env)
                 }
                 Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &args[..] {
                     [left, right] => binary_op(interp(left, env), interp(right, env)),
@@ -285,7 +285,7 @@ fn jili_error<'a>(value: Rc<Value>) -> Rc<Value<'a>> {
 }
 
 fn top_interp(source: &str) -> String {
-    let sexp = lexpr::from_str(&source).unwrap();
+    let sexp = lexpr::from_str(source).unwrap();
     let prog = parse(&sexp);
 
     let base_env: Environment = vec![
@@ -314,7 +314,10 @@ fn top_interp(source: &str) -> String {
         },
     ];
 
+    let now = Instant::now();
     let result = interp(&prog, &base_env);
+    println!("program execution took: {}", now.elapsed().as_millis());
+
     serialize(&result)
 }
 
