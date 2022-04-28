@@ -73,9 +73,9 @@ type Environment<'a> = Vec<BindingV<'a>>;
 fn main() {
     let source = "(var (
         (fib = (x fib => (if (<= x 1) x (+ (fib (- x 1) fib) (fib (- x 2) fib)))))
-    ) in (fib 17 fib))";
+    ) in (fib 25 fib))";
     let result = top_interp(source);
-    println!("Fibonacci of 17 is: {:?}", result);
+    println!("Fibonacci of 25 is: {:?}", result);
 }
 
 trait LexprConsExtensions {
@@ -95,8 +95,6 @@ fn parse<'a>(sexp: &'a lexpr::Value) -> ExprC<'a> {
         lexpr::Value::String(string) => ExprC::StringC(string),
         lexpr::Value::Cons(cons) => {
             let tokens = cons.to_shared_vec();
-            println!("tokens: len:{} {:?}", tokens.len(), tokens);
-            println!("cons: {:?}", cons);
             match &tokens[..] {
                 [lexpr::Value::Symbol(if_token), condition, then, els] if &**if_token == "if" => {
                     ExprC::IfC {
@@ -233,8 +231,6 @@ fn interp<'a>(exp: &ExprC<'a>, env: Environment<'a>) -> Rc<Value<'a>> {
                             }),
                     );
 
-                    println!("next env: {:?}", next_env);
-
                     interp(&body, next_env)
                 }
                 Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &args[..] {
@@ -291,7 +287,7 @@ fn jili_error<'a>(value: Rc<Value>) -> Rc<Value<'a>> {
 fn top_interp(source: &str) -> String {
     let sexp = lexpr::from_str(&source).unwrap();
     let prog = parse(&sexp);
-    println!("prog: {:?}", prog);
+
     let base_env: Environment = vec![
         jili_binary_arith!(+),
         jili_binary_arith!(-),
