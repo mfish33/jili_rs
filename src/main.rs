@@ -179,7 +179,7 @@ fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Rc<Value<'a
     panic!("JILI unbound identifier: {}", id);
 }
 
-fn interp<'a>(exp: &ExprC<'a>, env: Environment<'a>) -> Rc<Value<'a>> {
+fn interp<'a, 'b>(exp: &ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
     match exp {
         ExprC::NumC(num) => Rc::new(Value::NumV(*num)),
         ExprC::StringC(string) => Rc::new(Value::StringV(string)),
@@ -189,7 +189,7 @@ fn interp<'a>(exp: &ExprC<'a>, env: Environment<'a>) -> Rc<Value<'a>> {
             then,
             els,
         } => {
-            if interp(condition, env.clone())
+            if interp(condition, env)
                 .as_bool()
                 .expect("Conditional check must be a boolean")
             {
@@ -206,7 +206,7 @@ fn interp<'a>(exp: &ExprC<'a>, env: Environment<'a>) -> Rc<Value<'a>> {
         ExprC::AppC { fun, args } => {
             let value = match &**fun {
                 ExprC::IdC(name) => environment_lookup(&name, &env),
-                fn_exp => interp(&fn_exp, env.clone()),
+                fn_exp => interp(&fn_exp, env),
             };
             match value.borrow() {
                 Value::CloV {
@@ -224,17 +224,17 @@ fn interp<'a>(exp: &ExprC<'a>, env: Environment<'a>) -> Rc<Value<'a>> {
                     next_env.extend(
                         parameters
                             .into_iter()
-                            .zip(args.into_iter().map(|arg| interp(arg, env.clone())))
+                            .zip(args.into_iter().map(|arg| interp(arg, env)))
                             .map(|(from, to)| BindingV {
                                 from,
                                 to,
                             }),
                     );
 
-                    interp(&body, next_env)
+                    interp(&body, &next_env)
                 }
                 Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &args[..] {
-                    [left, right] => binary_op(interp(left, env.clone()), interp(right, env)),
+                    [left, right] => binary_op(interp(left, env), interp(right, env)),
                     _ => panic!(
                         "Can not apply binary op intrinsic without exactly 2 arguments {:?}",
                         args
@@ -314,7 +314,7 @@ fn top_interp(source: &str) -> String {
         },
     ];
 
-    let result = interp(&prog, base_env);
+    let result = interp(&prog, &base_env);
     serialize(&result)
 }
 
