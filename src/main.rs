@@ -1,6 +1,7 @@
 use std::{borrow::Borrow, rc::Rc, time::Instant};
 
 use lexpr::{self};
+use smallvec::{smallvec, SmallVec};
 
 #[derive(Clone, Debug, PartialEq)]
 enum ExprC<'a> {
@@ -68,14 +69,15 @@ struct BindingV<'a> {
     pub to: Rc<Value<'a>>,
 }
 
-type Environment<'a> = Vec<BindingV<'a>>;
+type EnvironmentStep<'a> = Rc<SmallVec<[BindingV<'a>; 8]>>;
+type Environment<'a> = SmallVec<[EnvironmentStep<'a>; 4]>;
 
 fn main() {
     let source = "(var (
         (fib = (x fib => (if (<= x 1) x (+ (fib (- x 1) fib) (fib (- x 2) fib)))))
-    ) in (fib 25 fib))";
+    ) in (fib 32 fib))";
     let result = top_interp(source);
-    println!("Fibonacci of 25 is: {:?}", result);
+    println!("Fibonacci of 32 is: {:?}", result);
 }
 
 trait LexprConsExtensions {
@@ -127,9 +129,7 @@ fn parse(sexp: &lexpr::Value) -> ExprC<'_> {
                         parameters: params
                             .iter()
                             .map(|symbol_any| {
-                                symbol_any
-                                    .as_symbol()
-                                    .expect("Params and name are strings")
+                                symbol_any.as_symbol().expect("Params and name are strings")
                             })
                             .collect(),
                     }
@@ -171,15 +171,19 @@ fn parse_binding<'a>(tokens: &Vec<&'a lexpr::Value>) -> (&'a str, ExprC<'a>) {
 }
 
 fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Rc<Value<'a>> {
-    for binding in env.iter().rev() {
-        if binding.from == id {
-            return Rc::clone(&binding.to);
-        }
+    if let Some(binding) = env
+        .iter()
+        .rev()
+        .flat_map(|step| step.iter())
+        .find(|binding| binding.from == id)
+    {
+        Rc::clone(&binding.to)
+    } else {
+        panic!("JILI unbound identifier: {}", id)
     }
-    panic!("JILI unbound identifier: {}", id);
 }
 
-fn interp<'a, 'b>(exp: &'a ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> {
+fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Rc<Value<'a>> {
     match exp {
         ExprC::NumC(num) => Rc::new(Value::NumV(*num)),
         ExprC::StringC(string) => Rc::new(Value::StringV(string)),
@@ -221,15 +225,13 @@ fn interp<'a, 'b>(exp: &'a ExprC<'a>, env:&'b Environment<'a>) -> Rc<Value<'a>> 
                         )
                     }
                     let mut next_env = clo_env.clone();
-                    next_env.extend(
+                    next_env.push(Rc::new(
                         parameters
                             .iter()
                             .zip(args.iter().map(|arg| interp(arg, env)))
-                            .map(|(from, to)| BindingV {
-                                from,
-                                to,
-                            }),
-                    );
+                            .map(|(from, to)| BindingV { from, to })
+                            .collect(),
+                    ));
 
                     interp(body, &next_env)
                 }
@@ -288,7 +290,7 @@ fn top_interp(source: &str) -> String {
     let sexp = lexpr::from_str(source).unwrap();
     let prog = parse(&sexp);
 
-    let base_env: Environment = vec![
+    let base_env: Environment = smallvec![Rc::new(smallvec![
         jili_binary_arith!(+),
         jili_binary_arith!(-),
         jili_binary_arith!(*),
@@ -312,7 +314,7 @@ fn top_interp(source: &str) -> String {
             from: "false",
             to: Rc::new(Value::BoolV(false)),
         },
-    ];
+    ])];
 
     let now = Instant::now();
     let result = interp(&prog, &base_env);
