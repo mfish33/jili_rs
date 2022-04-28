@@ -109,22 +109,7 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
                         })
                         .collect();
 
-                    fn create_chain(
-                        bindings: &[(String, ExprC)],
-                        last: &lexpr::Value,
-                    ) -> Box<ExprC> {
-                        match &bindings[..] {
-                            [] => Box::new(parse(last)),
-                            [(from, to), rst @ ..] => Box::new(ExprC::AppC {
-                                fun: Box::new(ExprC::CloC {
-                                    parameters: vec![from.clone()],
-                                    body: create_chain(rst, last),
-                                }),
-                                args: vec![to.clone()],
-                            }),
-                        }
-                    }
-                    *create_chain(&bindings, body)
+                    *create_binding_chain(&bindings, body)
                 }
                 [params @ .., lexpr::Value::Symbol(fn_def), body] if &**fn_def == "=>" => {
                     ExprC::CloC {
@@ -148,6 +133,22 @@ fn parse(sexp: &lexpr::Value) -> ExprC {
             }
         }
         _ => panic!("`parse` Unexpected syntax while parsing: {}", sexp),
+    }
+}
+
+fn create_binding_chain(
+    bindings: &[(String, ExprC)],
+    last: &lexpr::Value,
+) -> Box<ExprC> {
+    match &bindings[..] {
+        [] => Box::new(parse(last)),
+        [(from, to), rst @ ..] => Box::new(ExprC::AppC {
+            fun: Box::new(ExprC::CloC {
+                parameters: vec![from.clone()],
+                body: create_binding_chain(rst, last),
+            }),
+            args: vec![to.clone()],
+        }),
     }
 }
 
