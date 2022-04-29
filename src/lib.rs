@@ -72,14 +72,6 @@ struct BindingV<'a> {
 type EnvironmentStep<'a> = Rc<SmallVec<[BindingV<'a>; 8]>>;
 type Environment<'a> = SmallVec<[EnvironmentStep<'a>; 4]>;
 
-fn main() {
-    let source = "(var (
-        (fib = (x fib => (if (<= x 1) x (+ (fib (- x 1) fib) (fib (- x 2) fib)))))
-    ) in (fib 32 fib))";
-    let result = top_interp(source);
-    println!("Fibonacci of 32 is: {:?}", result);
-}
-
 trait LexprConsExtensions {
     fn to_shared_vec(&self) -> Vec<&lexpr::Value>;
 }
@@ -286,7 +278,7 @@ fn jili_error<'a>(value: Rc<Value>) -> Rc<Value<'a>> {
     panic!("JILI user-error got: {}", serialize(&value))
 }
 
-fn top_interp(source: &str) -> String {
+pub fn top_interp(source: &str) -> String {
     let sexp = lexpr::from_str(source).unwrap();
     let prog = parse(&sexp);
 
@@ -297,7 +289,7 @@ fn top_interp(source: &str) -> String {
         jili_binary_arith!(/),
         jili_binary_arith!(<=),
         BindingV {
-            from: "equals?",
+            from: "equal?",
             to: Rc::new(Value::Intrinsic(Intrinsic::Binary(|a, b| {
                 Rc::new(Value::BoolV(a == b))
             }))),
@@ -374,10 +366,19 @@ mod tests {
             "fn returns string"
         );
         assert_eq!(
-            top_interp(r#"(equals? "Hello World" "Hello World")"#),
+            top_interp(r#"(equal? "Hello World" "Hello World")"#),
             "true",
             "strings equal"
         );
+        assert_eq!(
+            top_interp(
+                "(var (
+                    (fact = (x fact => (if (equal? x 0) 1 (* x (fact (- x 1) fact)))))
+                ) in (fact 12 fact))"
+            ),
+            "479001600",
+            "Factorial of 12"
+        )
     }
 
     #[test]
