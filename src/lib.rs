@@ -1,7 +1,6 @@
 use std::{borrow::Borrow, rc::Rc, time::Instant};
 
 use lexpr::{self};
-use smallvec::{smallvec, SmallVec};
 
 #[derive(Clone, Debug, PartialEq)]
 enum ExprC<'a> {
@@ -36,10 +35,10 @@ enum Value<'a> {
     Intrinsic(Intrinsic<'a>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Intrinsic<'a> {
-    Binary(fn(Rc<Value<'a>>, Rc<Value<'a>>) -> Rc<Value<'a>>),
-    Unary(fn(Rc<Value<'a>>) -> Rc<Value<'a>>),
+    Binary(fn(Value<'a>, Value<'a>) -> Value<'a>),
+    Unary(fn(Value<'a>) -> Value<'a>),
 }
 
 impl<'a> Value<'a> {
@@ -66,11 +65,49 @@ impl<'a> From<bool> for Value<'a> {
 #[derive(Clone, Debug, PartialEq)]
 struct BindingV<'a> {
     pub from: &'a str,
-    pub to: Rc<Value<'a>>,
+    pub to: Value<'a>,
 }
 
-type EnvironmentStep<'a> = Rc<SmallVec<[BindingV<'a>; 8]>>;
-type Environment<'a> = SmallVec<[EnvironmentStep<'a>; 4]>;
+type Environment<'a> = Rc<Cons<BindingV<'a>>>;
+
+#[derive(Clone, Debug, PartialEq)]
+enum Cons<T> {
+    Empty,
+    Some{ value:T, next: Rc<Cons<T>> }
+}
+
+impl<T> Cons<T> {
+    fn new() -> Rc<Self> {
+        Rc::new(Cons::Empty)
+    }
+
+    fn from_vec(vec: Vec<T>) -> Rc<Self> {
+        let mut iter = Self::new();
+        for value in vec.into_iter() {
+            iter = iter.insert(value);
+        }
+        iter
+    }
+}
+
+trait ConsFunctionality<T> {
+    fn insert(&self, value:T) -> Self;
+    fn extend(&self, it: impl Iterator<Item = T>) -> Self;
+}
+
+impl<T>ConsFunctionality<T> for Rc<Cons<T>> {
+    fn insert(&self, value: T) -> Self {
+        Rc::new(Cons::Some { value, next: Rc::clone(self) })
+    }
+
+    fn extend(&self, it: impl Iterator<Item = T>) -> Self {
+        let mut cur = self.clone();
+        for value in it {
+            cur = cur.insert(value);
+        }
+        cur
+    }
+}
 
 trait LexprConsExtensions {
     fn to_shared_vec(&self) -> Vec<&lexpr::Value>;
@@ -162,23 +199,20 @@ fn parse_binding<'a>(tokens: &Vec<&'a lexpr::Value>) -> (&'a str, ExprC<'a>) {
     }
 }
 
-fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Rc<Value<'a>> {
-    if let Some(binding) = env
-        .iter()
-        .rev()
-        .flat_map(|step| step.iter())
-        .find(|binding| binding.from == id)
-    {
-        Rc::clone(&binding.to)
-    } else {
-        panic!("JILI unbound identifier: {}", id)
+fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Value<'a> {
+    match env.borrow() {
+        Cons::Some { value: BindingV { from, to }, next:_ } if from == &id => {
+            to.clone()
+        }
+        Cons::Some { value:_, next } => environment_lookup(id, next),
+        Cons::Empty => panic!("JILI unbound identifier: {}", id)
     }
 }
 
-fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Rc<Value<'a>> {
+fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Value<'a> {
     match exp {
-        ExprC::NumC(num) => Rc::new(Value::NumV(*num)),
-        ExprC::StringC(string) => Rc::new(Value::StringV(string)),
+        ExprC::NumC(num) => Value::NumV(*num),
+        ExprC::StringC(string) => Value::StringV(string),
         ExprC::IdC(id) => environment_lookup(id, env),
         ExprC::IfC {
             condition,
@@ -194,11 +228,11 @@ fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Rc<Value<'a>>
                 interp(els, env)
             }
         }
-        ExprC::CloC { parameters, body } => Rc::new(Value::CloV {
+        ExprC::CloC { parameters, body } => Value::CloV {
             body,
             parameters,
             environment: env.clone(),
-        }),
+        },
         ExprC::AppC { fun, args } => {
             let value = match &**fun {
                 ExprC::IdC(name) => environment_lookup(name, env),
@@ -216,16 +250,15 @@ fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Rc<Value<'a>>
                             parameters, args
                         )
                     }
-                    let mut next_env = clo_env.clone();
-                    next_env.push(Rc::new(
-                        parameters
-                            .iter()
-                            .zip(args.iter().map(|arg| interp(arg, env)))
-                            .map(|(from, to)| BindingV { from, to })
-                            .collect(),
-                    ));
+                    let next_env = clo_env.clone();
 
-                    interp(body, &next_env)
+                    let extension = parameters
+                    .iter()
+                    .zip(args.iter().map(|arg| interp(arg, env)))
+                    .map(|(from, to)| BindingV { from, to });
+                    let extended_env = next_env.extend(extension);
+
+                    interp(body, &extended_env)
                 }
                 Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &args[..] {
                     [left, right] => binary_op(interp(left, env), interp(right, env)),
@@ -265,16 +298,16 @@ macro_rules! jili_binary_arith {
     ($op:tt) => {
         BindingV{
             from: stringify!($op),
-            to: Rc::new(Value::Intrinsic(Intrinsic::Binary(|left, right| {
+            to: Value::Intrinsic(Intrinsic::Binary(|left, right| {
                 match(left.borrow(),right.borrow()) {
-                    (Value::NumV(left), Value::NumV(right)) => Rc::new((left $op right).into()),
+                    (Value::NumV(left), Value::NumV(right)) => (left $op right).into(),
                     _ => panic!("Intrinsic functions require numeric arguments")
                 }
-        })))}
+        }))}
     }
 }
 
-fn jili_error<'a>(value: Rc<Value>) -> Rc<Value<'a>> {
+fn jili_error<'a>(value: Value) -> Value<'a> {
     panic!("JILI user-error got: {}", serialize(&value))
 }
 
@@ -282,7 +315,7 @@ pub fn top_interp(source: &str) -> String {
     let sexp = lexpr::from_str(source).unwrap();
     let prog = parse(&sexp);
 
-    let base_env: Environment = smallvec![Rc::new(smallvec![
+    let base_env: Environment = Cons::from_vec(vec![
         jili_binary_arith!(+),
         jili_binary_arith!(-),
         jili_binary_arith!(*),
@@ -290,23 +323,23 @@ pub fn top_interp(source: &str) -> String {
         jili_binary_arith!(<=),
         BindingV {
             from: "equal?",
-            to: Rc::new(Value::Intrinsic(Intrinsic::Binary(|a, b| {
-                Rc::new(Value::BoolV(a == b))
-            }))),
+            to: Value::Intrinsic(Intrinsic::Binary(|a, b| {
+                Value::BoolV(a == b)
+            })),
         },
         BindingV {
             from: "error",
-            to: Rc::new(Value::Intrinsic(Intrinsic::Unary(jili_error))),
+            to: Value::Intrinsic(Intrinsic::Unary(jili_error)),
         },
         BindingV {
             from: "true",
-            to: Rc::new(Value::BoolV(true)),
+            to: Value::BoolV(true),
         },
         BindingV {
             from: "false",
-            to: Rc::new(Value::BoolV(false)),
+            to: Value::BoolV(false),
         },
-    ])];
+    ]);
 
     let now = Instant::now();
     let result = interp(&prog, &base_env);
