@@ -10,6 +10,7 @@ debug = true
 
 [dependencies]
 nom = "7"
+derivative = "2"
 
 [dev-dependencies]
 criterion = "0.3"

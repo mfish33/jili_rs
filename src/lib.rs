@@ -1,5 +1,6 @@
 use std::{borrow::Borrow, rc::Rc, time::Instant};
 
+use derivative::Derivative;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
@@ -30,12 +31,15 @@ enum ExprC<'a> {
     StringC(&'a str),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
+#[derive(Derivative)]
+#[derivative(PartialEq)]
 enum Value<'a> {
     NumV(f64),
     CloV {
         parameters: &'a Vec<&'a str>,
-        body: &'a ExprC<'a>,
+        #[derivative(PartialEq="ignore")]
+        body: CompiledExpr<'a>,
         environment: Environment<'a>,
     },
     StringV(&'a str),
@@ -70,7 +74,7 @@ impl<'a> From<bool> for Value<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct BindingV<'a> {
     pub from: &'a str,
     pub to: Value<'a>,
@@ -254,73 +258,99 @@ fn environment_lookup<'a, 'b>(id: &str, env: &'b Environment<'a>) -> Value<'a> {
     }
 }
 
-fn interp<'a, 'b>(exp: &'a ExprC<'a>, env: &'b Environment<'a>) -> Value<'a> {
+#[derive(Clone)]
+struct CompiledExpr<'s>(Rc<dyn 's + Fn(&Environment<'s>) -> Value<'s>>);
+
+impl<'s> CompiledExpr<'s> {
+    /// Creates a compiled expression IR from a generic closure.
+    pub(crate) fn new(closure: impl 's + Fn(&Environment<'s>) -> Value<'s>) -> Self {
+        CompiledExpr(Rc::new(closure))
+    }
+
+    /// Executes a filter against a provided context with values.
+    pub fn execute(&self, ctx: &Environment<'s>) -> Value<'s> {
+        self.0(ctx)
+    }
+}
+
+fn compile<'a>(exp: &'a ExprC<'a>) -> CompiledExpr<'a> {
     match exp {
-        ExprC::NumC(num) => Value::NumV(*num),
-        ExprC::StringC(string) => Value::StringV(string),
-        ExprC::IdC(id) => environment_lookup(id, env),
+        ExprC::NumC(num) => CompiledExpr::new(|_| Value::NumV(*num)),
+        ExprC::StringC(string) => CompiledExpr::new(|_| Value::StringV(string)),
+        ExprC::IdC(id) => CompiledExpr(Rc::new(|env| environment_lookup(id, env))),
         ExprC::IfC {
             condition,
             then,
             els,
         } => {
-            if interp(condition, env)
-                .as_bool()
-                .expect("Conditional check must be a boolean")
-            {
-                interp(then, env)
-            } else {
-                interp(els, env)
-            }
-        }
-        ExprC::CloC { parameters, body } => Value::CloV {
-            body,
-            parameters,
-            environment: env.clone(),
-        },
-        ExprC::AppC { fun, args } => {
-            let value = match &**fun {
-                ExprC::IdC(name) => environment_lookup(name, env),
-                fn_exp => interp(fn_exp, env),
-            };
-            match value.borrow() {
-                Value::CloV {
-                    parameters,
-                    body,
-                    environment: clo_env,
-                } => {
-                    if parameters.len() != args.len() {
-                        panic!(
-                            "Error calling function. Have parameters: {:?} but arguments: {:?}",
-                            parameters, args
-                        )
-                    }
-                    let next_env = clo_env.clone();
-
-                    let extension = parameters
-                        .iter()
-                        .zip(args.iter().map(|arg| interp(arg, env)))
-                        .map(|(from, to)| BindingV { from, to });
-                    let extended_env = next_env.extend(extension);
-
-                    interp(body, &extended_env)
+            let compiled_cond = compile(condition);
+            let compiled_then = compile(then);
+            let compiled_else = compile(els);
+            CompiledExpr(Rc::new(move |env| {
+                if compiled_cond
+                    .execute(env)
+                    .as_bool()
+                    .expect("Conditional check must be a boolean")
+                {
+                    compiled_then.execute(env)
+                } else {
+                    compiled_else.execute(env)
                 }
-                Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &args[..] {
-                    [left, right] => binary_op(interp(left, env), interp(right, env)),
-                    _ => panic!(
-                        "Can not apply binary op intrinsic without exactly 2 arguments {:?}",
-                        args
-                    ),
-                },
-                Value::Intrinsic(Intrinsic::Unary(unary_op)) => match &args[..] {
-                    [arg] => unary_op(interp(arg, env)),
-                    _ => panic!(
-                        "Can not apply unary op intrinsic without exactly 1 arguments {:?}",
-                        args
-                    ),
-                },
-                non_callable => panic!("Tried to call non callable value: {:?}", non_callable),
-            }
+            }))
+        }
+        ExprC::CloC { parameters, body } => {
+            let compiled_body = compile(body);
+            CompiledExpr::new(move |env| Value::CloV {
+                body: compiled_body.clone(),
+                parameters,
+                environment: env.clone(),
+            })
+        }
+        ExprC::AppC { fun, args } => {
+            let compiled_fun = compile(fun);
+            let compiled_args:Vec<_> = args.iter().map(compile).collect();
+            CompiledExpr::new(move |env| {
+                let value = compiled_fun.execute(env);
+                match value.borrow() {
+                    Value::CloV {
+                        parameters,
+                        body,
+                        environment: clo_env,
+                    } => {
+                        if parameters.len() != args.len() {
+                            panic!(
+                                "Error calling function. Have parameters: {:?} but arguments: {:?}",
+                                parameters, args
+                            )
+                        }
+
+                        let extension = parameters
+                            .iter()
+                            .zip(compiled_args.iter().map(|arg| arg.execute(env)))
+                            .map(|(from, to)| BindingV { from, to });
+                        let extended_env = clo_env.extend(extension);
+
+                        body.execute(&extended_env)
+                    }
+                    Value::Intrinsic(Intrinsic::Binary(binary_op)) => match &compiled_args[..] {
+                        [left, right] => {
+                            binary_op(left.execute(env), right.execute(env))
+                        }
+                        _ => panic!(
+                            "Can not apply binary op intrinsic without exactly 2 arguments {:?}",
+                            args
+                        ),
+                    },
+                    Value::Intrinsic(Intrinsic::Unary(unary_op)) => match &compiled_args[..] {
+                        [arg] => unary_op(arg.execute(env)),
+                        _ => panic!(
+                            "Can not apply unary op intrinsic without exactly 1 arguments {:?}",
+                            args
+                        ),
+                    },
+                    _ => panic!("Tried to call non callable value"),
+                }
+            })
         }
     }
 }
@@ -385,7 +415,9 @@ pub fn top_interp(source: &str) -> String {
     ]);
 
     let now = Instant::now();
-    let result = interp(&prog, &base_env);
+    let compiled_prog = compile(&prog);
+    let result = compiled_prog.execute(&base_env);
+    // let result = interp(&prog, &base_env);
     println!("program execution took: {}", now.elapsed().as_millis());
 
     serialize(&result)
